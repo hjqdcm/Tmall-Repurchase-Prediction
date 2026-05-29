@@ -1,6 +1,6 @@
 # Tmall-Repurchase-Prediction
 ---
-This is Nanjing university's 2026 spring big data class project.We chose project 1: Tmall-Repurchase-Prediction,which has four tasks. \
+This is Nanjing university's 2026 spring big data class project.We chose project 1: Tmall-Repurchase-Prediction,which has four tasks. 
 
 Collabrators:
 
