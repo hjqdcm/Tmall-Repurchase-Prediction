@@ -1,3 +1,4 @@
 task1/UserFeatures.class
-task1/FeatureExtractor.class
 task1/BehaviorLog.class
+task1/FeatureExtractor.class
+task1/FeatureExtractor$UserAgg.class
