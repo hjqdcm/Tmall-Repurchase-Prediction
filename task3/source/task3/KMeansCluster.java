@@ -5,6 +5,7 @@ import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.broadcast.Broadcast;
+import org.apache.spark.storage.StorageLevel;
 import scala.Tuple2;
 
 import java.util.*;
@@ -25,7 +26,7 @@ public class KMeansCluster {
 
         String hdfsUser = System.getenv("HADOOP_USER_NAME");
         if (hdfsUser == null || hdfsUser.isEmpty()) {
-            hdfsUser = "231220053a";
+            hdfsUser = "231220129a";
         }
 
         String task1OutputBase = "/user/" + hdfsUser + "/final_exp/exp1/output";
@@ -40,15 +41,14 @@ public class KMeansCluster {
         System.out.println("train:  " + trainPath);
         System.out.println("output: " + outputBase);
 
-        // 仅使用训练集用户
-        JavaPairRDD<Long, Boolean> trainUserIds = sc.textFile(trainPath)
+        // 训练集用户广播过滤，避免 features join 产生 shuffle
+        Set<Long> trainUserSet = new HashSet<>(sc.textFile(trainPath)
             .filter(line -> !line.startsWith("user_id") && !line.trim().isEmpty())
-            .map(line -> line.split(",")[0].trim())
-            .filter(uid -> !uid.isEmpty())
-            .mapToPair(uid -> new Tuple2<>(Long.parseLong(uid), true))
-            .reduceByKey((a, b) -> a);
-
-        long trainUserCount = trainUserIds.count();
+            .map(line -> Long.parseLong(line.split(",")[0].trim()))
+            .distinct()
+            .collect());
+        Broadcast<Set<Long>> trainUsersBC = sc.broadcast(trainUserSet);
+        long trainUserCount = trainUserSet.size();
         System.out.println("训练集用户数: " + trainUserCount);
 
         JavaPairRDD<Long, double[]> userVectors = sc.textFile(inputPath)
@@ -69,9 +69,10 @@ public class KMeansCluster {
                     return null;
                 }
             })
-            .filter(tuple -> tuple != null)
-            .join(trainUserIds)
-            .mapToPair(tuple -> new Tuple2<>(tuple._1, tuple._2._1));
+            .filter(tuple -> tuple != null && trainUsersBC.value().contains(tuple._1));
+
+        // 物化一次，后续迭代/采样/输出均复用，避免重复读盘
+        userVectors = userVectors.persist(StorageLevel.MEMORY_AND_DISK());
 
         long userCount = userVectors.count();
         System.out.println("参与聚类的训练集用户数: " + userCount);
@@ -92,18 +93,11 @@ public class KMeansCluster {
             System.out.println("\n========== 迭代 " + (iter + 1) + " ==========");
 
             final Broadcast<List<double[]>> iterCenters = broadcastCenters;
-            JavaPairRDD<Long, Integer> assignments = userVectors
-                .mapToPair(tuple -> new Tuple2<>(
-                    tuple._1,
-                    nearestCluster(tuple._2, iterCenters.value())
-                ));
-
-            JavaPairRDD<Integer, Tuple2<double[], Integer>> clusterSums = assignments
-                .join(userVectors)
+            // 单遍 map + reduceByKey：分配簇并聚合，省去 assignments join userVectors 的 shuffle
+            JavaPairRDD<Integer, Tuple2<double[], Integer>> clusterSums = userVectors
                 .mapToPair(tuple -> {
-                    int clusterId = tuple._2._1;
-                    double[] vector = tuple._2._2;
-                    return new Tuple2<>(clusterId, new Tuple2<>(vector, 1));
+                    int clusterId = nearestCluster(tuple._2, iterCenters.value());
+                    return new Tuple2<>(clusterId, new Tuple2<>(tuple._2, 1));
                 })
                 .reduceByKey((a, b) -> {
                     double[] sum = new double[3];
@@ -148,7 +142,8 @@ public class KMeansCluster {
             .mapToPair(tuple -> new Tuple2<>(
                 tuple._1,
                 nearestCluster(tuple._2, finalCentersBC.value())
-            ));
+            ))
+            .persist(StorageLevel.MEMORY_AND_DISK());
 
         JavaRDD<String> centersOutput = sc.parallelize(centers).zipWithIndex()
             .map(tuple -> {
@@ -183,11 +178,14 @@ public class KMeansCluster {
         }
 
         System.out.println("\n用户聚类标签示例 (前20条):");
-        for (String sample : labelsOutput.take(20)) {
-            System.out.println(sample);
+        for (Tuple2<Long, Integer> sample : finalAssignments.take(20)) {
+            System.out.println(sample._1 + "," + sample._2);
         }
 
+        trainUsersBC.destroy();
         broadcastCenters.destroy();
+        userVectors.unpersist();
+        finalAssignments.unpersist();
         sc.close();
     }
 
