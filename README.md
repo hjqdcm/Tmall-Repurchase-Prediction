@@ -7,4 +7,3 @@ Collabrators:
 Geng Zhirong: Done task1,task2 \
 Guan Haiwen : Done task3 \
 Guo Yiming : Done task4 \
-The project report is done by Guan Haiwen and Guo Yiming. 
