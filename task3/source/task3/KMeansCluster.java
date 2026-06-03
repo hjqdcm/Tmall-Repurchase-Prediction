@@ -15,6 +15,7 @@ public class KMeansCluster {
     private static final int MAX_ITERATIONS = 20;
     private static final double CONVERGENCE_THRESHOLD = 0.0001;
     private static final long RANDOM_SEED = 42L;
+    private static final String DEFAULT_DATA_BASE = "/user/root/final_exp/exp1";
 
     public static void main(String[] args) {
         SparkConf conf = new SparkConf()
@@ -26,19 +27,31 @@ public class KMeansCluster {
         if (hdfsUser == null || hdfsUser.isEmpty()) {
             hdfsUser = "231220053a";
         }
-        // 输入：task1 在 exp1 下的特征；输出：task3 写到 exp3
+
         String task1OutputBase = "/user/" + hdfsUser + "/final_exp/exp1/output";
         String task3OutputBase = "/user/" + hdfsUser + "/final_exp/exp3/output";
         String inputPath = args.length > 0 ? args[0] : task1OutputBase + "/user_features.csv";
         String outputBase = args.length > 1 ? args[1] : task3OutputBase;
+        String trainPath = args.length > 2 ? args[2] : DEFAULT_DATA_BASE + "/train.csv";
+
         String outputCentersPath = outputBase + "/cluster_centers.txt";
         String outputLabelsPath = outputBase + "/user_cluster_labels.csv";
         System.out.println("input:  " + inputPath);
+        System.out.println("train:  " + trainPath);
         System.out.println("output: " + outputBase);
 
-        JavaRDD<String> featuresRdd = sc.textFile(inputPath);
+        // 仅使用训练集用户
+        JavaPairRDD<Long, Boolean> trainUserIds = sc.textFile(trainPath)
+            .filter(line -> !line.startsWith("user_id") && !line.trim().isEmpty())
+            .map(line -> line.split(",")[0].trim())
+            .filter(uid -> !uid.isEmpty())
+            .mapToPair(uid -> new Tuple2<>(Long.parseLong(uid), true))
+            .reduceByKey((a, b) -> a);
 
-        JavaPairRDD<Long, double[]> userVectors = featuresRdd
+        long trainUserCount = trainUserIds.count();
+        System.out.println("训练集用户数: " + trainUserCount);
+
+        JavaPairRDD<Long, double[]> userVectors = sc.textFile(inputPath)
             .filter(line -> !line.trim().isEmpty())
             .mapToPair(line -> {
                 String[] parts = line.split(",");
@@ -56,10 +69,12 @@ public class KMeansCluster {
                     return null;
                 }
             })
-            .filter(tuple -> tuple != null);
+            .filter(tuple -> tuple != null)
+            .join(trainUserIds)
+            .mapToPair(tuple -> new Tuple2<>(tuple._1, tuple._2._1));
 
         long userCount = userVectors.count();
-        System.out.println("用户数量: " + userCount);
+        System.out.println("参与聚类的训练集用户数: " + userCount);
         if (userCount < K) {
             throw new IllegalStateException("用户数少于聚类数 K=" + K);
         }
