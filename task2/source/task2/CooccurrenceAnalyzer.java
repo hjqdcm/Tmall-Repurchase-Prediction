@@ -12,6 +12,8 @@ import java.util.stream.Collectors;
 
 public class CooccurrenceAnalyzer {
 
+    private static final String DEFAULT_DATA_BASE = "/user/root/final_exp/exp1";
+
     public static void main(String[] args) {
         SparkConf conf = new SparkConf()
             .setAppName("Task2_CooccurrenceAnalysis");
@@ -22,18 +24,33 @@ public class CooccurrenceAnalyzer {
         if (hdfsUser == null || hdfsUser.isEmpty()) {
             hdfsUser = "231220053a";
         }
-        // 平台默认 HDFS 路径；本地测试可传参：args[0]=输入, args[1]=输出目录
-        String inputPath = args.length > 0 ? args[0]
-            : "/user/root/final_exp/exp1/train.csv";
-        String outputBase = args.length > 1 ? args[1]
-            : "/user/" + hdfsUser + "/final_exp/exp2/output";
+
+        String trainPath;
+        String testPath;
+        String outputBase;
+        if (args.length >= 3) {
+            trainPath = args[0];
+            testPath = args[1];
+            outputBase = args[2];
+        } else if (args.length == 2) {
+            // 本地单文件测试：args[0]=输入, args[1]=输出
+            trainPath = args[0];
+            testPath = args[0];
+            outputBase = args[1];
+        } else {
+            trainPath = DEFAULT_DATA_BASE + "/train.csv";
+            testPath = DEFAULT_DATA_BASE + "/test.csv";
+            outputBase = "/user/" + hdfsUser + "/final_exp/exp2/output";
+        }
+
         String outputIndexPath = outputBase + "/item_user_inverted_index.txt";
         String outputCooccurPath = outputBase + "/item_co_occurrence.txt";
-        System.out.println("input:  " + inputPath);
+        System.out.println("train:  " + trainPath);
+        System.out.println("test:   " + testPath);
         System.out.println("output: " + outputBase);
 
-        // ==================== 步骤1: 读取数据 ====================
-        JavaRDD<String> rawRdd = sc.textFile(inputPath);
+        // train + test 合并处理
+        JavaRDD<String> rawRdd = sc.textFile(trainPath).union(sc.textFile(testPath));
 
         JavaRDD<String> dataRdd = rawRdd.filter(line ->
             !line.startsWith("user_id") && !line.trim().isEmpty()
@@ -41,7 +58,6 @@ public class CooccurrenceAnalyzer {
 
         System.out.println("原始日志行数: " + dataRdd.count());
 
-        // ==================== 步骤2: 解析并过滤深度交互 ====================
         JavaRDD<LogEntry> logsRdd = dataRdd
             .map(line -> {
                 String[] parts = line.split(",");
@@ -71,10 +87,9 @@ public class CooccurrenceAnalyzer {
         long deepCount = deepInteractRdd.count();
         System.out.println("深度交互记录数: " + deepCount);
 
-        // ==================== 步骤3: 构建倒排索引 (item_id -> 用户列表) ====================
         JavaPairRDD<Long, Iterable<Long>> invertedIndex = deepInteractRdd
             .mapToPair(log -> new Tuple2<>(log.itemId, log.userId))
-            .distinct()  // 同一用户对同一商品只计一次
+            .distinct()
             .groupByKey()
             .mapValues(userIds -> {
                 List<Long> list = new ArrayList<>();
@@ -95,7 +110,6 @@ public class CooccurrenceAnalyzer {
         invertedOutput.saveAsTextFile(outputIndexPath);
         System.out.println("倒排索引已保存，商品数: " + invertedIndex.count());
 
-        // ==================== 步骤4: 构建用户-商品列表 ====================
         JavaPairRDD<Long, Iterable<Long>> userItemsRdd = deepInteractRdd
             .mapToPair(log -> new Tuple2<>(log.userId, log.itemId))
             .distinct()
@@ -111,7 +125,6 @@ public class CooccurrenceAnalyzer {
 
         System.out.println("有深度交互的用户数: " + userItemsRdd.count());
 
-        // ==================== 步骤5: 共现次数（Jaccard 分子：被同一用户深度交互的商品对） ====================
         JavaPairRDD<Tuple2<Long, Long>, Integer> cooccurRdd = userItemsRdd
             .flatMapToPair(tuple -> {
                 List<Long> items = new ArrayList<>();
@@ -140,7 +153,6 @@ public class CooccurrenceAnalyzer {
         long cooccurCount = cooccurRdd.count();
         System.out.println("共现对总数: " + cooccurCount);
 
-        // ==================== 步骤6: 排序取前1000 ====================
         List<Tuple2<Tuple2<Long, Long>, Integer>> top1000 = cooccurRdd
             .mapToPair(t -> new Tuple2<>(t._2, t._1))
             .sortByKey(false)
@@ -157,7 +169,6 @@ public class CooccurrenceAnalyzer {
 
         cooccurOutput.coalesce(1).saveAsTextFile(outputCooccurPath);
 
-        // ==================== 步骤7: 输出统计信息 ====================
         System.out.println("\n========== 任务二完成 ==========");
         System.out.println("深度交互记录数: " + deepCount);
         System.out.println("倒排索引商品数: " + invertedIndex.count());
